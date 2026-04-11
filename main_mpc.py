@@ -1,6 +1,7 @@
 from scipy.signal import cont2discrete
 from scipy.integrate import solve_ivp
 from types import SimpleNamespace
+import cvxpy as cp
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -12,7 +13,8 @@ from visualization import (
     plot_angles,
     plot_positions,
     plot_velocities,
-    plot_payload_trajectory
+    plot_payload_trajectory,
+    plot_payload_position_error
 )
 from meshcat_crane_viz import visualize_crane_meshcat
 
@@ -81,7 +83,8 @@ def discretize_system(A, B, Ts):
     Ad, Bd, _, _, _ = cont2discrete((A, B, C, D), Ts)
     return Ad, Bd
 
-Ts = 0.01
+N = 20
+Ts = 0.1
 Ad, Bd = discretize_system(A, B, Ts)
 
 nx = A.shape[0]
@@ -96,8 +99,8 @@ print(Bd)
 # 6) Reference
 # ============================================================
 x_ref = np.array([
-    3.0,   # r_target
-    0.0,   # phi_target
+    4.0,   # r_target
+    0.4,   # phi_target
     0.0,   # alpha_t
     0.0,   # alpha_n
     0.0,   # dr
@@ -108,55 +111,133 @@ x_ref = np.array([
 
 x_ref_tilde = x_ref - x_eq
 
+
+def wrap_angle(angle):
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
 # ============================================================
 # 7) Váhy MPC
 # ============================================================
-Q = np.diag([800.0, 800.0, 3000.0, 3000.0, 150.0, 150.0, 1000.0, 1000.0])
+def payload_polar_position(x, params):
+    r, phi, alpha, beta = x[:4]
+    l = params["l"]
+
+    radial_offset = r + l * np.sin(alpha) * np.cos(beta)
+    tangential_offset = l * np.sin(beta)
+
+    rho = np.hypot(radial_offset, tangential_offset)
+    theta = phi + np.arctan2(tangential_offset, radial_offset)
+
+    return np.array([rho, theta], dtype=float)
+
+
+def linearize_payload_position(x_ref, params, eps=1e-6):
+    C = np.zeros((2, len(x_ref)), dtype=float)
+
+    for i in range(len(x_ref)):
+        dx = np.zeros(len(x_ref), dtype=float)
+        dx[i] = eps
+
+        y_plus = payload_polar_position(x_ref + dx, params)
+        y_minus = payload_polar_position(x_ref - dx, params)
+
+        dy = y_plus - y_minus
+        dy[1] = wrap_angle(dy[1])
+        C[:, i] = dy / (2.0 * eps)
+
+    return C
+
+
+Q_state = np.diag([800.0, 800.0, 800.0, 800.0, 150.0, 150.0, 1000.0, 1000.0])
+Q_payload = np.diag([2000.0, 2000.0])
+
+C_payload = linearize_payload_position(x_ref, params)
+
+Q = Q_state + C_payload.T @ Q_payload @ C_payload
 R = np.diag([0.001, 0.001])
+Rd = np.diag([0.05, 0.05])
 P = Q.copy()
 
+
 # ============================================================
-# 8) Neomezené MPC přes Riccatiho rekurzi
+# 8) MPC pres celou posloupnost stavu a vstupu
 # ============================================================
-class UnconstrainedMPC:
-    def __init__(self, Ad, Bd, Q, R, P, N):
+# Explicit constrained full-horizon MPC solved as a QP.
+class SequenceMPC:
+    def __init__(self, Ad, Bd, Q, R, Rd, P, N, u_min, u_max):
         self.Ad = Ad
         self.Bd = Bd
         self.Q = Q
         self.R = R
+        self.Rd = Rd
         self.P = P
         self.N = N
         self.nx = Ad.shape[0]
         self.nu = Bd.shape[1]
 
-    def solve(self, x0_tilde, x_ref_tilde):
+        self.x = cp.Variable((self.nx, N + 1))
+        self.u = cp.Variable((self.nu, N))
+        self.x0_param = cp.Parameter(self.nx)
+        self.x_ref_param = cp.Parameter(self.nx)
+        self.u_prev_param = cp.Parameter(self.nu)
+
+        cost = 0
+        constraints = [self.x[:, 0] == self.x0_param]
+
+        for k in range(N):
+            x_error = self.x[:, k] - self.x_ref_param
+            cost += cp.quad_form(x_error, cp.psd_wrap(Q))
+            cost += cp.quad_form(self.u[:, k], cp.psd_wrap(R))
+
+            if k == 0:
+                du = self.u[:, k] - self.u_prev_param
+            else:
+                du = self.u[:, k] - self.u[:, k - 1]
+            cost += cp.quad_form(du, cp.psd_wrap(Rd))
+
+            constraints += [
+                self.x[:, k + 1] == Ad @ self.x[:, k] + Bd @ self.u[:, k],
+                self.u[:, k] >= u_min,
+                self.u[:, k] <= u_max
+            ]
+
+        terminal_error = self.x[:, N] - self.x_ref_param
+        cost += cp.quad_form(terminal_error, cp.psd_wrap(P))
+
+        self.problem = cp.Problem(cp.Minimize(cost), constraints)
+
+    def solve(self, x0_tilde, x_ref_tilde, u_prev_tilde):
         """
-        Vrátí první optimální vstup pro neomezené konečněhorizontové MPC.
-        Řeší tracking přes augmentaci na chybu e = x - x_ref.
+        Solves the full finite-horizon QP:
+        x[:,0], ..., x[:,N] and u[:,0], ..., u[:,N-1].
+        The simulation loop applies only u[:,0].
         """
-        A = self.Ad
-        B = self.Bd
-        Q = self.Q
-        R = self.R
-        P = self.P
-        N = self.N
+        self.x0_param.value = x0_tilde
+        self.x_ref_param.value = x_ref_tilde
+        self.u_prev_param.value = u_prev_tilde
 
-        e0 = x0_tilde - x_ref_tilde
+        self.problem.solve(
+            solver=cp.OSQP,
+            warm_start=True,
+            verbose=False,
+            max_iter=50000,
+            eps_abs=1e-3,
+            eps_rel=1e-3,
+            polish=False
+        )
 
-        # zpětná Riccatiho rekurze
-        S = [None] * (N + 1)
-        K = [None] * N
-        S[N] = P
+        if self.problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            self.problem.solve(
+                solver=cp.CLARABEL,
+                warm_start=True,
+                verbose=False,
+                max_iter=2000
+            )
 
-        for k in range(N - 1, -1, -1):
-            BtSB = B.T @ S[k + 1] @ B
-            inv_term = np.linalg.inv(R + BtSB)
-            K[k] = inv_term @ (B.T @ S[k + 1] @ A)
-            S[k] = Q + A.T @ S[k + 1] @ A - A.T @ S[k + 1] @ B @ K[k]
+        if self.problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            raise RuntimeError(f"MPC QP solve failed: {self.problem.status}")
 
-        # první krok
-        u0_tilde = -K[0] @ e0
-        return u0_tilde
+        return self.u.value[:, 0], self.x.value, self.u.value
 
 # ============================================================
 # 9) Pomocné převody
@@ -210,17 +291,20 @@ if not sol_open.success:
     raise RuntimeError(sol_open.message)
 
 # ============================================================
-# 12) Closed-loop simulace s neomezeným MPC
+# 12) Closed-loop simulace s omezenym QP MPC
 # ============================================================
-N = 30
 
-mpc = UnconstrainedMPC(
+
+mpc = SequenceMPC(
     Ad=Ad,
     Bd=Bd,
     Q=Q,
     R=R,
+    Rd=Rd,
     P=P,
-    N=N
+    N=N,
+    u_min=np.array([-params["F_r_max"], -params["M_phi_max"]], dtype=float) - u_eq,
+    u_max=np.array([params["F_r_max"], params["M_phi_max"]], dtype=float) - u_eq
 )
 
 def simulate_nonlinear_step(x, u, Ts, d):
@@ -242,9 +326,12 @@ def simulate_nonlinear_step(x, u, Ts, d):
 
 x_hist = np.zeros((nx, len(t_eval)))
 u_hist = np.zeros((nu, len(t_eval) - 1))
+x_pred_hist = np.zeros((nx, N + 1, len(t_eval) - 1))
+u_pred_hist = np.zeros((nu, N, len(t_eval) - 1))
 
 x_current = x0.copy()
 x_hist[:, 0] = x_current
+u_prev_tilde = np.zeros(nu, dtype=float)
 
 for k in range(len(t_eval) - 1):
     d_k = np.array([
@@ -255,16 +342,16 @@ for k in range(len(t_eval) - 1):
 
     x_tilde = state_to_deviation(x_current)
 
-    u_tilde = mpc.solve(
+    u_tilde, x_pred, u_pred = mpc.solve(
         x0_tilde=x_tilde,
-        x_ref_tilde=x_ref_tilde
+        x_ref_tilde=x_ref_tilde,
+        u_prev_tilde=u_prev_tilde
     )
+    x_pred_hist[:, :, k] = x_pred
+    u_pred_hist[:, :, k] = u_pred
 
     u = input_from_deviation(u_tilde)
-
-    # volitelná fyzikální saturace plantu
-    u[0] = np.clip(u[0], -params["F_r_max"], params["F_r_max"])
-    u[1] = np.clip(u[1], -params["M_phi_max"], params["M_phi_max"])
+    u_prev_tilde = u_tilde
 
     u_hist[:, k] = u
     x_next = simulate_nonlinear_step(x_current, u, Ts, d_k)
@@ -302,21 +389,24 @@ def plot_control_inputs_mpc(t, u_hist, control_method="MPC", u_ref=None):
         )
     plt.xlabel("čas [s]")
     plt.ylabel("vstupy")
-    plt.title("Průběh řídicích vstupů - neomezené MPC")
+    plt.title("Prubeh ridicich vstupu - omezene QP MPC")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
     plt.show()
 
+
 # ============================================================
 # 14) Ploty
 # ============================================================
 control_method = "MPC"
+payload_ref = payload_polar_position(x_ref, params)
 
 plot_angles(sol_open, sol_mpc, control_method=control_method, x_ref=x_ref)
 plot_positions(sol_open, sol_mpc, control_method=control_method, x_ref=x_ref)
 plot_velocities(sol_open, sol_mpc, control_method=control_method, x_ref=x_ref)
 plot_payload_trajectory(sol_open, sol_mpc, params, control_method=control_method, x_ref=x_ref)
+plot_payload_position_error(sol_open, sol_mpc, params, payload_ref, control_method=control_method)
 plot_control_inputs_mpc(t_eval, u_hist, control_method=control_method, u_ref=u_eq)
 
 visualize_crane_meshcat(sol_mpc, params, t_eval)

@@ -173,9 +173,4 @@ def visualize_crane_meshcat(sol_closed, params, t_eval=None, playback_speed=1.0,
 
     update_crane(sol_closed.y[:, -1], params)
 
-    # Keep the MeshCat visualizer open until the user closes it.
-    try:
-        input("MeshCat visualization is running. Press Enter to close.")
-    except KeyboardInterrupt:
-        pass
-    vis.close()
+

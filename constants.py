@@ -20,7 +20,7 @@ l = 5.0         # délka lana [m]
 h = 10.0        # výška závěsu nad zemí [m]
 
 # Setrvačnost ramene
-J_phi = 2000.0  # moment setrvačnosti kolem osy otáčení [kg·m^2]
+J_phi = 3000.0  # moment setrvačnosti kolem osy otáčení [kg·m^2]
 
 # Tlumení (volitelné, pro realističtější model)
 d_r = 50.0      # tlumení v radiálním směru
@@ -33,9 +33,9 @@ d_beta = 10.0   # tlumení kyvu (β)
 # VĚTRNÉ PORUCHY
 # =========================
 
-wind_std_wr = 1000.0   # směrodatná odchylka radiální větrné síly [N]
-wind_std_wt = 1000.0   # směrodatná odchylka tangenciální větrné síly [N]
-wind_std_wz = 20.0   # směrodatná odchylka vertikální větrné síly [N]
+wind_std_wr = 00.0   # směrodatná odchylka radiální větrné síly [N]
+wind_std_wt = 0.0   # směrodatná odchylka tangenciální větrné síly [N]
+wind_std_wz = 0.0   # směrodatná odchylka vertikální větrné síly [N]
 
 
 # =========================

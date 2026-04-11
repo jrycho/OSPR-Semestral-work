@@ -24,6 +24,23 @@ def _plot_target_line(t, value, name, unit):
     )
 
 
+def _wrap_angle(angle):
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def payload_polar_position(state, params):
+    r, phi, alpha, beta = state[:4]
+    l = params["l"]
+
+    radial_offset = r + l * np.sin(alpha) * np.cos(beta)
+    tangential_offset = l * np.sin(beta)
+
+    rho = np.hypot(radial_offset, tangential_offset)
+    theta = phi + np.arctan2(tangential_offset, radial_offset)
+
+    return np.array([rho, theta], dtype=float)
+
+
 # =========================================================
 # 1) Uhly kyvu (alpha, beta)
 # =========================================================
@@ -205,5 +222,62 @@ def plot_payload_trajectory(sol_open, sol_closed, params, control_method="LQR", 
     plt.colorbar(lc_open, ax=ax, shrink=0.8, label=f"cas [s] - bez {method}")
     plt.colorbar(lc_closed, ax=ax, shrink=0.8, label=f"cas [s] - s {method}")
 
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_payload_position_error(sol_open, sol_closed, params, payload_ref, control_method="MPC"):
+    method = _method_label(control_method)
+    payload_open = np.array([
+        payload_polar_position(x, params)
+        for x in sol_open.y.T
+    ])
+    payload_closed = np.array([
+        payload_polar_position(x, params)
+        for x in sol_closed.y.T
+    ])
+
+    open_error = payload_open - payload_ref
+    closed_error = payload_closed - payload_ref
+    open_error[:, 1] = _wrap_angle(open_error[:, 1])
+    closed_error[:, 1] = _wrap_angle(closed_error[:, 1])
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(sol_open.t, open_error[:, 0], label=f"rho error bez {method}")
+    plt.plot(sol_closed.t, closed_error[:, 0], "--", label=f"rho error s {method}")
+    plt.hlines(
+        0.0,
+        sol_closed.t[0],
+        sol_closed.t[-1],
+        colors="0.35",
+        linestyles=":",
+        linewidth=1.5,
+        label="rho target error = 0 m",
+    )
+    plt.xlabel("cas [s]")
+    plt.ylabel("rho error [m]")
+    plt.title(f"Chyba polohy bremene rho - {method}")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(sol_open.t, open_error[:, 1], label=f"theta error bez {method}")
+    plt.plot(sol_closed.t, closed_error[:, 1], "--", label=f"theta error s {method}")
+    plt.hlines(
+        0.0,
+        sol_closed.t[0],
+        sol_closed.t[-1],
+        colors="0.35",
+        linestyles=":",
+        linewidth=1.5,
+        label="theta target error = 0 rad",
+    )
+    plt.xlabel("cas [s]")
+    plt.ylabel("theta error [rad]")
+    plt.title(f"Chyba polohy bremene theta - {method}")
+    plt.grid(True)
+    plt.legend()
     plt.tight_layout()
     plt.show()
