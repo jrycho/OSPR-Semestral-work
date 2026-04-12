@@ -33,8 +33,8 @@ d_beta = 10.0   # tlumení kyvu (β)
 # VĚTRNÉ PORUCHY
 # =========================
 
-wind_std_wr = 00.0   # směrodatná odchylka radiální větrné síly [N]
-wind_std_wt = 0.0   # směrodatná odchylka tangenciální větrné síly [N]
+wind_std_wr = 500.0   # směrodatná odchylka radiální větrné síly [N]
+wind_std_wt = 500.0   # směrodatná odchylka tangenciální větrné síly [N]
 wind_std_wz = 0.0   # směrodatná odchylka vertikální větrné síly [N]
 
 

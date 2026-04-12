@@ -148,8 +148,8 @@ def linearize_payload_position(x_ref, params, eps=1e-6):
     return C
 
 
-Q_state = np.diag([800.0, 800.0, 800.0, 800.0, 150.0, 150.0, 1000.0, 1000.0])
-Q_payload = np.diag([2000.0, 2000.0])
+Q_state = np.diag([100.0, 100.0, 100.0, 100.0, 1500.0, 1500.0, 2000.0, 3000.0])
+Q_payload = np.diag([4000.0, 4000.0])
 
 C_payload = linearize_payload_position(x_ref, params)
 
