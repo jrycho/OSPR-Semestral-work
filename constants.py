@@ -52,8 +52,8 @@ M_phi_max = 10000.0  # max moment [Nm]
 
 # stav: [r, phi, alpha, beta, dr, dphi, dalpha, dbeta]
 x0 = np.array([
-    3.5,    # r [m]
-    0.3,    # phi [rad]
+    4.0,    # r [m]
+    0.4,    # phi [rad]
     0.1,    # alpha [rad] (malý kyv)
     0.05,   # beta [rad]
     0.0,    # dr
