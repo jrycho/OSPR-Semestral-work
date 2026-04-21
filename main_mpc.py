@@ -334,31 +334,48 @@ x_hist[:, 0] = x_current
 u_prev_tilde = np.zeros(nu, dtype=float)
 
 for k in range(len(t_eval) - 1):
+    # Disturbance sample applied during the current simulation step.
+    # MPC itself uses the nominal linear model; the disturbance is injected
+    # only into the nonlinear plant simulation below.
     d_k = np.array([
         wind_wr_samples[k],
         wind_wt_samples[k],
         wind_wz_samples[k]
     ], dtype=float)
 
+    # Convert the absolute nonlinear state to deviation coordinates around
+    # the chosen equilibrium/reference point.
     x_tilde = state_to_deviation(x_current)
 
+    # Solve the finite-horizon QP for the current state. Only the first
+    # control action is applied; the rest is stored for plotting/debugging.
     u_tilde, x_pred, u_pred = mpc.solve(
         x0_tilde=x_tilde,
         x_ref_tilde=x_ref_tilde,
         u_prev_tilde=u_prev_tilde
     )
+
+    # Store the predicted state and input trajectories from this MPC update.
     x_pred_hist[:, :, k] = x_pred
     u_pred_hist[:, :, k] = u_pred
 
+    # Convert the optimized input deviation back to the physical input.
     u = input_from_deviation(u_tilde)
+
+    # Keep the previously applied deviation input for input-rate constraints
+    # or delta-u penalties in the next MPC solve.
     u_prev_tilde = u_tilde
 
+    # Apply the first MPC input to the nonlinear plant for one sample period.
     u_hist[:, k] = u
     x_next = simulate_nonlinear_step(x_current, u, Ts, d_k)
 
+    # Store the simulated state and advance the receding-horizon loop.
     x_hist[:, k + 1] = x_next
     x_current = x_next
 
+# Wrap the simulated MPC trajectory in the same shape used by solve_ivp
+# outputs, so the existing plotting functions can be reused.
 sol_mpc = SimpleNamespace(t=t_eval, y=x_hist)
 
 # ============================================================
