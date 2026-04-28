@@ -63,12 +63,7 @@ u_eq = np.array([
 # ============================================================
 # 4) Linearizace
 # ============================================================
-def f_xu(x, u):
-    d = np.zeros(3, dtype=float)
-    return plant_dynamics(x, u, d)
-
-
-A, B = linearize_system(f_xu, x_eq, u_eq)
+A, B = linearize_system(plant_dynamics, x_eq, u_eq)
 
 print("Matice A:")
 print(A)
@@ -115,13 +110,13 @@ def linearize_payload_position(x_ref, params, eps=1e-6):
 # ============================================================
 # 6) Vahy LQR
 # ============================================================
-Q_state = np.diag([800.0, 800.0, 3000.0, 3000.0, 150.0, 20.0, 1000.0, 1000.0])
-Q_payload = np.diag([4000.0, 4000.0])
+Q_state = np.diag([5.0, 5.0, 80.0, 80.0, 5.0, 2.0, 30.0, 30.0])
+Q_payload = np.diag([1500.0, 2500.0])
 
 C_payload = linearize_payload_position(x_ref, params)
 
 Q = Q_state + C_payload.T @ Q_payload @ C_payload
-R = np.diag([0.001, 0.001])
+R = np.diag([1.6e-5, 2.0e-6])
 
 P = solve_continuous_are(A, B, Q, R)
 K = np.linalg.inv(R) @ B.T @ P
@@ -133,7 +128,7 @@ print(K)
 # ============================================================
 # 7) Vstupni funkce LQR
 # ============================================================
-def control_input(t, x, x_ref, u_ref, K, params):
+def control_input(x, K, params):
     dx = x - x_eq
     dx[1] = wrap_angle(dx[1])
 
@@ -180,7 +175,7 @@ def rhs_open_loop(t, x):
 
 
 def rhs_closed_loop(t, x):
-    u = control_input(t, x, x_ref, u_eq, K, params)
+    u = control_input(x, K, params)
     d = disturbance_input(t)
     return plant_dynamics(x, u, d)
 
@@ -222,8 +217,6 @@ plot_payload_position_error(sol_open, sol_lqr, params, payload_ref, control_meth
 plot_control_inputs(
     sol_lqr,
     control_input,
-    x_eq,
-    u_eq,
     K,
     params,
     control_method=control_method,

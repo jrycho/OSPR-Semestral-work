@@ -122,11 +122,11 @@ def plot_velocities(sol_open, sol_closed, control_method="LQR", x_ref=None):
 # =========================================================
 # 4) Ridici vstupy
 # =========================================================
-def plot_control_inputs(sol_closed, control_input, x_eq, u_eq, K, params, control_method="LQR", u_ref=None):
+def plot_control_inputs(sol_closed, control_input, K, params, control_method="LQR", u_ref=None):
     method = _method_label(control_method)
     u_hist = np.array([
-        control_input(t, x, x_eq, u_eq, K, params)
-        for t, x in zip(sol_closed.t, sol_closed.y.T)
+        control_input(x, K, params)
+        for x in sol_closed.y.T
     ])
 
     plt.figure(figsize=(10, 6))

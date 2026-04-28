@@ -1,5 +1,6 @@
 from scipy.signal import cont2discrete
 from scipy.integrate import solve_ivp
+from scipy.linalg import solve_discrete_are
 from types import SimpleNamespace
 import cvxpy as cp
 import numpy as np
@@ -10,6 +11,7 @@ from symbolic_model import build_crane_model
 from mat_model import crane_dynamics
 from linearization import linearize_system
 from visualization import (
+    payload_polar_position,
     plot_angles,
     plot_positions,
     plot_velocities,
@@ -61,11 +63,7 @@ u_eq = np.array([
 # ============================================================
 # 4) Linearizace
 # ============================================================
-def f_xu(x, u):
-    d = np.zeros(3, dtype=float)
-    return plant_dynamics(x, u, d)
-
-A, B = linearize_system(f_xu, x_eq, u_eq)
+A, B = linearize_system(plant_dynamics, x_eq, u_eq)
 
 print("Matice A:")
 print(A)
@@ -83,7 +81,7 @@ def discretize_system(A, B, Ts):
     Ad, Bd, _, _, _ = cont2discrete((A, B, C, D), Ts)
     return Ad, Bd
 
-N = 20
+N = 50
 Ts = 0.1
 Ad, Bd = discretize_system(A, B, Ts)
 
@@ -99,8 +97,8 @@ print(Bd)
 # 6) Reference
 # ============================================================
 x_ref = np.array([
-    4.0,   # r_target
-    0.4,   # phi_target
+    r0,     # r
+    phi0   ,# phi
     0.0,   # alpha_t
     0.0,   # alpha_n
     0.0,   # dr
@@ -108,7 +106,6 @@ x_ref = np.array([
     0.0,   # dalpha_t
     0.0    # dalpha_n
 ], dtype=float)
-
 x_ref_tilde = x_ref - x_eq
 
 
@@ -118,19 +115,6 @@ def wrap_angle(angle):
 # ============================================================
 # 7) Váhy MPC
 # ============================================================
-def payload_polar_position(x, params):
-    r, phi, alpha, beta = x[:4]
-    l = params["l"]
-
-    radial_offset = r + l * np.sin(alpha) * np.cos(beta)
-    tangential_offset = l * np.sin(beta)
-
-    rho = np.hypot(radial_offset, tangential_offset)
-    theta = phi + np.arctan2(tangential_offset, radial_offset)
-
-    return np.array([rho, theta], dtype=float)
-
-
 def linearize_payload_position(x_ref, params, eps=1e-6):
     C = np.zeros((2, len(x_ref)), dtype=float)
 
@@ -148,96 +132,132 @@ def linearize_payload_position(x_ref, params, eps=1e-6):
     return C
 
 
-Q_state = np.diag([100.0, 100.0, 100.0, 100.0, 1500.0, 1500.0, 2000.0, 3000.0])
-Q_payload = np.diag([4000.0, 4000.0])
+Q_state = np.diag([5.0, 5.0, 80.0, 80.0, 5.0, 2.0, 30.0, 30.0])
+Q_payload = np.diag([1500.0, 2500.0])
 
 C_payload = linearize_payload_position(x_ref, params)
 
 Q = Q_state + C_payload.T @ Q_payload @ C_payload
-R = np.diag([0.001, 0.001])
-Rd = np.diag([0.05, 0.05])
-P = Q.copy()
+R = np.diag([400.0, 200.0])
+u_scale = np.array([params["F_r_max"], params["M_phi_max"]], dtype=float)
+Bd_mpc = Bd @ np.diag(u_scale)
+P = solve_discrete_are(Ad, Bd_mpc, Q, R)
 
 
 # ============================================================
-# 8) MPC pres celou posloupnost stavu a vstupu
+# 8) MPC s omezenim vstupu
 # ============================================================
-# Explicit constrained full-horizon MPC solved as a QP.
-class SequenceMPC:
-    def __init__(self, Ad, Bd, Q, R, Rd, P, N, u_min, u_max):
+class CvxpyMPC:
+    """
+    Finite-horizon MPC written as a CVXPY optimization problem.
+
+    The constraints are the discrete prediction model and actuator limits:
+
+        x[k+1] = Ad*x[k] + Bd_scaled*v[k]
+        -1 <= v[k] <= 1
+
+    v[k] is normalized actuator usage. The physical input sent to the
+    nonlinear plant is:
+
+        u[k] = u_scale * v[k]
+
+    The minimized cost function uses payload-focused Q and normalized input R:
+
+        min_U J(U)
+
+    where:
+
+        J(U) =
+            sum from k = 0 to N-1:
+                x_error[k].T Q x_error[k] + v[k].T R v[k]
+            + x_error[N].T P x_error[N]
+
+        U = [v[0], v[1], ..., v[N-1]]
+    """
+
+    def __init__(self, Ad, Bd_scaled, Q, R, P, N, u_scale):
         self.Ad = Ad
-        self.Bd = Bd
+        self.Bd = Bd_scaled
         self.Q = Q
         self.R = R
-        self.Rd = Rd
         self.P = P
         self.N = N
+        self.u_scale = u_scale
         self.nx = Ad.shape[0]
-        self.nu = Bd.shape[1]
+        self.nu = Bd_scaled.shape[1]
+
+        self.x0_param = cp.Parameter(self.nx)
+        self.xr_param = cp.Parameter(self.nx)
 
         self.x = cp.Variable((self.nx, N + 1))
-        self.u = cp.Variable((self.nu, N))
-        self.x0_param = cp.Parameter(self.nx)
-        self.x_ref_param = cp.Parameter(self.nx)
-        self.u_prev_param = cp.Parameter(self.nu)
+        self.v = cp.Variable((self.nu, N))
 
         cost = 0
         constraints = [self.x[:, 0] == self.x0_param]
 
         for k in range(N):
-            x_error = self.x[:, k] - self.x_ref_param
+            x_error = self.x[:, k] - self.xr_param
             cost += cp.quad_form(x_error, cp.psd_wrap(Q))
-            cost += cp.quad_form(self.u[:, k], cp.psd_wrap(R))
-
-            if k == 0:
-                du = self.u[:, k] - self.u_prev_param
-            else:
-                du = self.u[:, k] - self.u[:, k - 1]
-            cost += cp.quad_form(du, cp.psd_wrap(Rd))
+            cost += cp.quad_form(self.v[:, k], cp.psd_wrap(R))
 
             constraints += [
-                self.x[:, k + 1] == Ad @ self.x[:, k] + Bd @ self.u[:, k],
-                self.u[:, k] >= u_min,
-                self.u[:, k] <= u_max
+                self.x[:, k + 1] == Ad @ self.x[:, k] + Bd_scaled @ self.v[:, k],
+                self.v[:, k] >= -1.0,
+                self.v[:, k] <= 1.0
             ]
 
-        terminal_error = self.x[:, N] - self.x_ref_param
+        terminal_error = self.x[:, N] - self.xr_param
         cost += cp.quad_form(terminal_error, cp.psd_wrap(P))
 
         self.problem = cp.Problem(cp.Minimize(cost), constraints)
 
-    def solve(self, x0_tilde, x_ref_tilde, u_prev_tilde):
-        """
-        Solves the full finite-horizon QP:
-        x[:,0], ..., x[:,N] and u[:,0], ..., u[:,N-1].
-        The simulation loop applies only u[:,0].
-        """
+    def solve(self, x0_tilde, xr_tilde):
         self.x0_param.value = x0_tilde
-        self.x_ref_param.value = x_ref_tilde
-        self.u_prev_param.value = u_prev_tilde
+        self.xr_param.value = xr_tilde
 
-        self.problem.solve(
-            solver=cp.OSQP,
-            warm_start=True,
-            verbose=False,
-            max_iter=50000,
-            eps_abs=1e-3,
-            eps_rel=1e-3,
-            polish=False
-        )
+        solver_attempts = [
 
-        if self.problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-            self.problem.solve(
-                solver=cp.CLARABEL,
-                warm_start=True,
-                verbose=False,
-                max_iter=2000
+            (
+                cp.CLARABEL,
+                {
+                    "warm_start": True,
+                    "verbose": False,
+                    "max_iter": 10000
+                }
+            ),      
+            (
+                cp.SCS,
+                {
+                    "warm_start": True,
+                    "verbose": False,
+                    "max_iters": 20000,
+                    "eps": 1e-3
+                }
+            ),
+            (
+                cp.OSQP,
+                {
+                    "warm_start": True,
+                    "verbose": False,
+                    "max_iter": 200000,
+                    "eps_abs": 1e-2,
+                    "eps_rel": 1e-2,
+                    "polish": False
+                }
             )
 
-        if self.problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-            raise RuntimeError(f"MPC QP solve failed: {self.problem.status}")
+        ]
 
-        return self.u.value[:, 0], self.x.value, self.u.value
+        for solver, options in solver_attempts:
+            try:
+                self.problem.solve(solver=solver, **options)
+            except cp.SolverError:
+                continue
+
+            if self.problem.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+                return self.u_scale * self.v[:, 0].value
+
+        return None
 
 # ============================================================
 # 9) Pomocné převody
@@ -263,7 +283,7 @@ def generate_wind_samples(t_grid):
 # 11) Open-loop simulace
 # ============================================================
 t0 = 0.0
-tf = 30.0
+tf = 100.0
 t_eval = np.arange(t0, tf + Ts, Ts)
 
 wind_wr_samples, wind_wt_samples, wind_wz_samples = generate_wind_samples(t_eval)
@@ -291,21 +311,18 @@ if not sol_open.success:
     raise RuntimeError(sol_open.message)
 
 # ============================================================
-# 12) Closed-loop simulace s omezenym QP MPC
+# 12) Closed-loop simulace s MPC
 # ============================================================
-
-
-mpc = SequenceMPC(
+mpc = CvxpyMPC(
     Ad=Ad,
-    Bd=Bd,
+    Bd_scaled=Bd_mpc,
     Q=Q,
     R=R,
-    Rd=Rd,
     P=P,
     N=N,
-    u_min=np.array([-params["F_r_max"], -params["M_phi_max"]], dtype=float) - u_eq,
-    u_max=np.array([params["F_r_max"], params["M_phi_max"]], dtype=float) - u_eq
+    u_scale=u_scale
 )
+
 
 def simulate_nonlinear_step(x, u, Ts, d):
     def rhs(t, xx):
@@ -324,58 +341,33 @@ def simulate_nonlinear_step(x, u, Ts, d):
 
     return sol.y[:, -1]
 
+
 x_hist = np.zeros((nx, len(t_eval)))
 u_hist = np.zeros((nu, len(t_eval) - 1))
-x_pred_hist = np.zeros((nx, N + 1, len(t_eval) - 1))
-u_pred_hist = np.zeros((nu, N, len(t_eval) - 1))
 
 x_current = x0.copy()
 x_hist[:, 0] = x_current
-u_prev_tilde = np.zeros(nu, dtype=float)
 
 for k in range(len(t_eval) - 1):
-    # Disturbance sample applied during the current simulation step.
-    # MPC itself uses the nominal linear model; the disturbance is injected
-    # only into the nonlinear plant simulation below.
     d_k = np.array([
         wind_wr_samples[k],
         wind_wt_samples[k],
         wind_wz_samples[k]
     ], dtype=float)
 
-    # Convert the absolute nonlinear state to deviation coordinates around
-    # the chosen equilibrium/reference point.
     x_tilde = state_to_deviation(x_current)
+    u_tilde = mpc.solve(x_tilde, x_ref_tilde)
 
-    # Solve the finite-horizon QP for the current state. Only the first
-    # control action is applied; the rest is stored for plotting/debugging.
-    u_tilde, x_pred, u_pred = mpc.solve(
-        x0_tilde=x_tilde,
-        x_ref_tilde=x_ref_tilde,
-        u_prev_tilde=u_prev_tilde
-    )
+    if u_tilde is None:
+        raise RuntimeError(f"MPC solve failed: {mpc.problem.status}")
 
-    # Store the predicted state and input trajectories from this MPC update.
-    x_pred_hist[:, :, k] = x_pred
-    u_pred_hist[:, :, k] = u_pred
-
-    # Convert the optimized input deviation back to the physical input.
     u = input_from_deviation(u_tilde)
-
-    # Keep the previously applied deviation input for input-rate constraints
-    # or delta-u penalties in the next MPC solve.
-    u_prev_tilde = u_tilde
-
-    # Apply the first MPC input to the nonlinear plant for one sample period.
     u_hist[:, k] = u
-    x_next = simulate_nonlinear_step(x_current, u, Ts, d_k)
 
-    # Store the simulated state and advance the receding-horizon loop.
+    x_next = simulate_nonlinear_step(x_current, u, Ts, d_k)
     x_hist[:, k + 1] = x_next
     x_current = x_next
 
-# Wrap the simulated MPC trajectory in the same shape used by solve_ivp
-# outputs, so the existing plotting functions can be reused.
 sol_mpc = SimpleNamespace(t=t_eval, y=x_hist)
 
 # ============================================================
@@ -406,7 +398,7 @@ def plot_control_inputs_mpc(t, u_hist, control_method="MPC", u_ref=None):
         )
     plt.xlabel("čas [s]")
     plt.ylabel("vstupy")
-    plt.title("Prubeh ridicich vstupu - omezene QP MPC")
+    plt.title("Prubeh ridicich vstupu - MPC s omezenim vstupu")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
