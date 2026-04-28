@@ -1,10 +1,21 @@
-# OSPR SEMESTRAL WORK
-## By Jan Rychtera
+# OSPR Semestral Work
 
-# About
+Simplified rotary crane model with a suspended payload on a taut rope. The crane is controlled by trolley force `F_r` and rotation torque `M_phi`.
 
-This work focuses on creation of a very simplified crane model actuated by force moment of rotation around Z axis and force on a cart under which paload is set up.
+## Files
 
-Assume that payload is on a taut, unsagging rope.
+- `symbolic_model.py` - derives the crane equations.
+- `mat_model.py` - evaluates nonlinear dynamics.
+- `linearization.py` - computes linearized `A, B` matrices.
+- `main_lqr.py` - LQR simulation.
+- `main_mpc.py` - constrained MPC simulation.
+- `main_compare.py` - LQR vs MPC comparison plots and costs.
 
-# contents
+## Run
+
+```powershell
+pip install -r requirements.text
+python main_compare.py
+```
+
+Run commands from the `semestral-work` directory.

@@ -97,8 +97,8 @@ print(Bd)
 # 6) Reference
 # ============================================================
 x_ref = np.array([
-    r0,     # r
-    phi0   ,# phi
+    4.0,   # r_target
+    0.4,   # phi_target
     0.0,   # alpha_t
     0.0,   # alpha_n
     0.0,   # dr
